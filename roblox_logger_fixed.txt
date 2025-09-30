@@ -230,24 +230,10 @@ function Logger:HookGlobals()
     end
 end
 
--- Хук game:GetService
+-- Хук game:GetService (убран - не работает в KRNL)
 function Logger:HookGetService()
-    local logger = self
-    local game_mt = getrawmetatable(game)
-    
-    -- Пробуем через hookmetamethod если доступно
-    if hookmetamethod then
-        self.original_funcs.game_namecall = hookmetamethod(game, "__namecall", function(...)
-            local method = getnamecallmethod()
-            local args = {...}
-            
-            if method == "GetService" and logger.running then
-                logger:Log(string.format('game:GetService("%s")', args[2]))
-            end
-            
-            return logger.original_funcs.game_namecall(...)
-        end)
-    end
+    -- KRNL не поддерживает hookmetamethod
+    -- Этот метод отключен
 end
 
 -- Установка всех хуков
