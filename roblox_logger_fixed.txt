@@ -88,11 +88,9 @@ end
 
 -- Логирование
 function Logger:Log(code)
-    -- Временно выключаем логирование чтобы избежать рекурсии
-    self.running = false
     table.insert(self.logs, code)
-    print("[SPY] " .. code)
-    self.running = true
+    -- Закомментировано чтобы не спамить консоль
+    -- print("[SPY] " .. code)
 end
 
 -- Главный хук - перехватываем ВСЁ
@@ -282,6 +280,11 @@ function SpyScript(code)
     print("Function Spy - Starting...")
     print("===========================================\n")
     
+    -- Ждём секунду чтобы игра загрузилась
+    task.wait(1)
+    
+    -- ВАЖНО: Включаем логгер ТОЛЬКО ПЕРЕД запуском целевого скрипта
+    Logger.running = true
     Logger:Hook()
     
     -- Запускаем целевой скрипт
@@ -298,8 +301,9 @@ function SpyScript(code)
     end
     
     -- Даём время на async операции
-    task.wait(3)
+    task.wait(2)
     
+    -- ВЫКЛЮЧАЕМ логгер
     Logger.running = false
     
     print("\n===========================================")
@@ -308,7 +312,6 @@ function SpyScript(code)
     print("===========================================\n")
     
     local report = Logger:GenerateReport()
-    print(report)
     
     -- Сохраняем в файл
     if writefile then
