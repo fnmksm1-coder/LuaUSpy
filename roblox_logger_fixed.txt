@@ -1,283 +1,197 @@
--- Function Spy для KRNL (без metatable хуков)
--- Перехватывает только основные функции
+-- Function Spy для KRNL (Wrapper подход - БЕЗ хуков)
+-- Модифицирует сам скрипт перед выполнением
 
 local Logger = {
     logs = {},
-    instances = {},
     instance_counter = 0,
-    running = false,
-    original_funcs = {}
+    instances = {}
 }
 
--- Генерация ID для Instance
-function Logger:GetInstanceID(inst)
-    if not self.instances[inst] then
-        self.instance_counter = self.instance_counter + 1
-        self.instances[inst] = "_inst" .. self.instance_counter
-    end
-    return self.instances[inst]
-end
-
--- Безопасная сериализация
+-- Сериализация значений
 function Logger:Serialize(value)
-    local t = type(value)
+    local t = typeof(value)
     
     if t == "nil" then
         return "nil"
     elseif t == "boolean" or t == "number" then
         return tostring(value)
     elseif t == "string" then
-        if #value > 50 then
-            return '"' .. value:sub(1, 50) .. '..."'
-        end
-        return '"' .. value:gsub('"', '\\"') .. '"'
-    elseif t == "userdata" then
-        -- Проверяем Instance
-        local success, result = pcall(function()
-            if value.ClassName then
-                return self:GetInstanceID(value)
-            end
-        end)
-        if success and result then
-            return result
-        end
-        
-        -- Проверяем другие типы
-        local success2, typename = pcall(function()
-            return typeof(value)
-        end)
-        
-        if success2 then
-            if typename == "Color3" then
-                local success3, r, g, b = pcall(function()
-                    return math.floor(value.R * 255), 
-                           math.floor(value.G * 255), 
-                           math.floor(value.B * 255)
-                end)
-                if success3 then
-                    return string.format("Color3.fromRGB(%d, %d, %d)", r, g, b)
-                end
-            elseif typename == "UDim2" then
-                local success3 = pcall(function()
-                    return value.X.Scale, value.X.Offset, 
-                           value.Y.Scale, value.Y.Offset
-                end)
-                if success3 then
-                    return string.format("UDim2.new(%s, %s, %s, %s)", 
-                        value.X.Scale, value.X.Offset, 
-                        value.Y.Scale, value.Y.Offset)
-                end
-            elseif typename == "Vector3" then
-                return string.format("Vector3.new(%s, %s, %s)", value.X, value.Y, value.Z)
-            elseif typename == "Vector2" then
-                return string.format("Vector2.new(%s, %s)", value.X, value.Y)
-            end
-        end
-        
-        return "userdata"
-    elseif t == "table" then
-        local success, str = pcall(tostring, value)
-        if success and str:match("^Enum%.") then
-            return str
-        end
-        return "{...}"
+        return string.format('"%s"', value:gsub('"', '\\"'):sub(1, 50))
+    elseif t == "Instance" then
+        return value:GetFullName()
+    elseif t == "Color3" then
+        return string.format("Color3.fromRGB(%d, %d, %d)", 
+            math.floor(value.R * 255), 
+            math.floor(value.G * 255), 
+            math.floor(value.B * 255))
+    elseif t == "UDim2" then
+        return string.format("UDim2.new(%s, %s, %s, %s)", 
+            value.X.Scale, value.X.Offset, 
+            value.Y.Scale, value.Y.Offset)
+    elseif t == "Vector3" then
+        return string.format("Vector3.new(%s, %s, %s)", value.X, value.Y, value.Z)
+    elseif t == "Vector2" then
+        return string.format("Vector2.new(%s, %s)", value.X, value.Y)
+    elseif t == "EnumItem" then
+        return tostring(value)
     else
-        local success, str = pcall(tostring, value)
-        if success then
-            return str
-        end
-        return t
+        return tostring(value)
     end
 end
 
--- Логирование
-function Logger:Log(code)
-    table.insert(self.logs, code)
-end
-
--- Хук Instance.new
-function Logger:HookInstanceNew()
-    self.original_funcs.Instance_new = Instance.new
-    local logger = self
-    
-    Instance.new = function(className, parent)
-        local inst = logger.original_funcs.Instance_new(className, parent)
+-- Обёртка для Instance.new
+local function CreateInstanceWrapper()
+    return function(className, parent)
+        local inst = Instance.new(className, parent)
         
-        if logger.running then
-            local id = logger:GetInstanceID(inst)
-            if parent then
-                local parent_id = logger:GetInstanceID(parent)
-                logger:Log(string.format('local %s = Instance.new("%s", %s)', id, className, parent_id))
-            else
-                logger:Log(string.format('local %s = Instance.new("%s")', id, className))
-            end
-            
-            -- Хукаем присвоение свойств для этого instance
-            logger:HookInstanceProperties(inst, id)
+        local id = "_inst" .. Logger.instance_counter
+        Logger.instance_counter = Logger.instance_counter + 1
+        Logger.instances[inst] = id
+        
+        if parent then
+            table.insert(Logger.logs, string.format('local %s = Instance.new("%s", %s)', 
+                id, className, Logger.instances[parent] or "game.CoreGui"))
+        else
+            table.insert(Logger.logs, string.format('local %s = Instance.new("%s")', id, className))
         end
+        
+        -- Отслеживаем изменения свойств
+        local tracked_props = {}
+        task.spawn(function()
+            while inst.Parent and #Logger.logs < 10000 do
+                for _, prop in ipairs({"Name", "Size", "Position", "BackgroundColor3", "Text", "TextColor3", "Font", "TextSize", "Visible", "BackgroundTransparency", "ImageTransparency"}) do
+                    local success, value = pcall(function() return inst[prop] end)
+                    if success and value ~= tracked_props[prop] then
+                        tracked_props[prop] = value
+                        local val_str = Logger:Serialize(value)
+                        table.insert(Logger.logs, string.format('%s.%s = %s', id, prop, val_str))
+                    end
+                end
+                task.wait(0.05)
+            end
+        end)
         
         return inst
     end
 end
 
--- Хук свойств конкретного Instance
-function Logger:HookInstanceProperties(inst, id)
-    local logger = self
-    
-    -- Список свойств для отслеживания
-    local props = {
-        "Name", "Parent", "Size", "Position", "BackgroundColor3",
-        "Text", "TextColor3", "Font", "TextSize", "Visible",
-        "Transparency", "BackgroundTransparency", "BorderSizePixel",
-        "AnchorPoint", "Rotation", "ZIndex", "LayoutOrder",
-        "ImageColor3", "ImageTransparency", "Image", "ResetOnSpawn"
-    }
-    
-    -- Оборачиваем каждое свойство
-    for _, prop in ipairs(props) do
-        pcall(function()
-            local original_value = inst[prop]
-            local prop_set = false
-            
-            -- Создаём "ловушку" через hookfunction (если доступно)
-            -- Иначе используем polling
-            task.spawn(function()
-                local last_value = original_value
-                while logger.running and inst.Parent do
-                    task.wait(0.1)
-                    local success, current = pcall(function() return inst[prop] end)
-                    if success and current ~= last_value and not prop_set then
-                        local val_str = logger:Serialize(current)
-                        logger:Log(string.format('%s.%s = %s', id, prop, val_str))
-                        last_value = current
-                    end
-                end
-            end)
-        end)
-    end
-end
-
--- Хук Color3
-function Logger:HookColor3()
-    self.original_funcs.Color3_fromRGB = Color3.fromRGB
-    local logger = self
-    
-    Color3.fromRGB = function(r, g, b)
-        local color = logger.original_funcs.Color3_fromRGB(r, g, b)
-        
-        if logger.running then
-            local id = logger:GetInstanceID(color)
-            logger:Log(string.format('local %s = Color3.fromRGB(%d, %d, %d)', id, r, g, b))
-        end
-        
+-- Обёртка для Color3.fromRGB
+local function CreateColor3Wrapper()
+    return function(r, g, b)
+        local color = Color3.fromRGB(r, g, b)
+        local id = "_color" .. Logger.instance_counter
+        Logger.instance_counter = Logger.instance_counter + 1
+        Logger.instances[color] = id
+        table.insert(Logger.logs, string.format('local %s = Color3.fromRGB(%d, %d, %d)', id, r, g, b))
         return color
     end
 end
 
--- Хук UDim2
-function Logger:HookUDim2()
-    self.original_funcs.UDim2_new = UDim2.new
-    local logger = self
+-- Инжектируем обёртки в окружение скрипта
+function Logger:CreateEnvironment()
+    local env = setmetatable({}, {__index = getfenv()})
     
-    UDim2.new = function(xScale, xOffset, yScale, yOffset)
-        local udim = logger.original_funcs.UDim2_new(xScale, xOffset, yScale, yOffset)
-        -- Не логируем UDim2 напрямую, только когда присваивается к Instance
-        return udim
-    end
-end
-
--- Хук глобальных функций
-function Logger:HookGlobals()
-    -- task.wait
-    if task and task.wait then
-        self.original_funcs.task_wait = task.wait
-        local logger = self
-        
-        task.wait = function(time)
-            if logger.running and time and time > 0 then
-                logger:Log(string.format('task.wait(%s)', time))
+    -- Переопределяем Instance
+    env.Instance = setmetatable({}, {
+        __index = function(t, k)
+            if k == "new" then
+                return CreateInstanceWrapper()
             end
-            return logger.original_funcs.task_wait(time)
+            return Instance[k]
         end
-    end
+    })
     
-    -- task.spawn
-    if task and task.spawn then
-        self.original_funcs.task_spawn = task.spawn
-        local logger = self
-        
-        task.spawn = function(func, ...)
-            if logger.running then
-                logger:Log('task.spawn(function(...)')
-                logger:Log('    -- async function spawned')
-                logger:Log('end)')
+    -- Переопределяем Color3
+    env.Color3 = setmetatable({}, {
+        __index = function(t, k)
+            if k == "fromRGB" then
+                return CreateColor3Wrapper()
+            elseif k == "new" then
+                return function(r, g, b)
+                    local color = Color3.new(r, g, b)
+                    local id = "_color" .. Logger.instance_counter
+                    Logger.instance_counter = Logger.instance_counter + 1
+                    Logger.instances[color] = id
+                    table.insert(Logger.logs, string.format('local %s = Color3.new(%s, %s, %s)', id, r, g, b))
+                    return color
+                end
             end
-            return logger.original_funcs.task_spawn(func, ...)
+            return Color3[k]
         end
+    })
+    
+    -- Переопределяем UDim2
+    env.UDim2 = setmetatable({}, {
+        __index = function(t, k)
+            if k == "new" then
+                return function(...)
+                    return UDim2.new(...)
+                end
+            end
+            return UDim2[k]
+        end
+    })
+    
+    -- Переопределяем game
+    env.game = setmetatable({}, {
+        __index = function(t, k)
+            if k == "GetService" then
+                return function(self, serviceName)
+                    table.insert(Logger.logs, string.format('game:GetService("%s")', serviceName))
+                    return game:GetService(serviceName)
+                end
+            end
+            return game[k]
+        end,
+        __namecall = function(self, ...)
+            local method = getnamecallmethod()
+            if method == "GetService" then
+                local args = {...}
+                table.insert(Logger.logs, string.format('game:GetService("%s")', args[1]))
+                return game:GetService(args[1])
+            end
+            return game[method](game, ...)
+        end
+    })
+    
+    -- Переопределяем task
+    if task then
+        env.task = setmetatable({}, {
+            __index = function(t, k)
+                if k == "wait" then
+                    return function(time)
+                        if time and time > 0 then
+                            table.insert(Logger.logs, string.format('task.wait(%s)', time))
+                        end
+                        return task.wait(time)
+                    end
+                elseif k == "spawn" then
+                    return function(func, ...)
+                        table.insert(Logger.logs, 'task.spawn(function(...)')
+                        return task.spawn(func, ...)
+                    end
+                end
+                return task[k]
+            end
+        })
     end
     
-    -- writefile
+    -- Переопределяем writefile
     if writefile then
-        self.original_funcs.writefile = writefile
-        local logger = self
-        
-        _G.writefile = function(name, content)
-            if logger.running then
-                logger:Log(string.format('writefile("%s", ...)', name))
-            end
-            return logger.original_funcs.writefile(name, content)
+        env.writefile = function(name, content)
+            table.insert(Logger.logs, string.format('writefile("%s", ...)', name))
+            return writefile(name, content)
         end
     end
-end
-
--- Хук game:GetService (убран - не работает в KRNL)
-function Logger:HookGetService()
-    -- KRNL не поддерживает hookmetamethod
-    -- Этот метод отключен
-end
-
--- Установка всех хуков
-function Logger:Hook()
-    print("[Logger] Installing hooks...")
     
-    self:HookInstanceNew()
-    self:HookColor3()
-    self:HookUDim2()
-    self:HookGlobals()
-    
-    -- Пробуем хукнуть GetService
-    pcall(function()
-        self:HookGetService()
-    end)
-    
-    print("[Logger] Hooks installed!")
-end
-
--- Восстановление оригинальных функций
-function Logger:Restore()
-    if self.original_funcs.Instance_new then
-        Instance.new = self.original_funcs.Instance_new
-    end
-    if self.original_funcs.Color3_fromRGB then
-        Color3.fromRGB = self.original_funcs.Color3_fromRGB
-    end
-    if self.original_funcs.task_wait and task then
-        task.wait = self.original_funcs.task_wait
-    end
-    if self.original_funcs.task_spawn and task then
-        task.spawn = self.original_funcs.task_spawn
-    end
-    if self.original_funcs.writefile then
-        _G.writefile = self.original_funcs.writefile
-    end
+    return env
 end
 
 -- Генерация отчёта
 function Logger:GenerateReport()
     local report = {
-        "-- Function Spy Output (KRNL Edition)",
-        "-- Total operations logged: " .. #self.logs,
-        "-- Note: Some operations may be missing due to executor limitations",
+        "-- Function Spy Output (KRNL Environment Wrapper)",
+        "-- Total operations: " .. #self.logs,
         "",
         ""
     }
@@ -292,27 +206,26 @@ end
 -- Главная функция
 function SpyScript(code)
     print("\n===========================================")
-    print("Function Spy - Starting... (KRNL Edition)")
+    print("Function Spy - Starting...")
     print("===========================================\n")
     
-    -- Очищаем предыдущие логи
+    -- Очищаем
     Logger.logs = {}
     Logger.instances = {}
     Logger.instance_counter = 0
     
-    -- Устанавливаем хуки
-    Logger:Hook()
+    -- Создаём окружение с обёртками
+    local env = Logger:CreateEnvironment()
     
-    -- Включаем логирование
-    Logger.running = true
+    print("[Spy] Executing with wrapped environment...")
     
-    -- Запускаем целевой скрипт
-    print("[Spy] Executing target script...")
+    -- Загружаем и выполняем скрипт в нашем окружении
     local success, err = pcall(function()
         local func, load_err = loadstring(code)
         if not func then
             error("Failed to load script: " .. tostring(load_err))
         end
+        setfenv(func, env)
         func()
     end)
     
@@ -320,15 +233,8 @@ function SpyScript(code)
         warn("[Spy] Script error: " .. tostring(err))
     end
     
-    -- Даём время на async операции
     print("[Spy] Waiting for async operations...")
     task.wait(3)
-    
-    -- Выключаем логирование
-    Logger.running = false
-    
-    -- Восстанавливаем функции
-    Logger:Restore()
     
     print("\n===========================================")
     print("Function Spy - Complete!")
@@ -337,7 +243,7 @@ function SpyScript(code)
     
     local report = Logger:GenerateReport()
     
-    -- Сохраняем в файл
+    -- Сохраняем
     if writefile then
         pcall(function()
             writefile("spy_output.lua", report)
@@ -345,44 +251,34 @@ function SpyScript(code)
         end)
     end
     
-    -- Выводим первые 20 строк
-    print("\n--- First 20 operations ---")
-    for i = 1, math.min(20, #Logger.logs) do
+    -- Показываем первые 30 строк
+    print("\n--- First 30 operations ---")
+    for i = 1, math.min(30, #Logger.logs) do
         print(Logger.logs[i])
     end
-    if #Logger.logs > 20 then
+    if #Logger.logs > 30 then
         print("... (see spy_output.lua for full log)")
     end
     
     return report
 end
 
--- Простой тест
+-- Тест
 function TestSpy()
-    print("Running simple test...")
+    print("Running test...")
     
-    Logger:Hook()
-    Logger.running = true
+    local test_code = [[
+        local sg = Instance.new("ScreenGui", game.CoreGui)
+        sg.Name = "TestGUI"
+        
+        local frame = Instance.new("Frame", sg)
+        frame.Size = UDim2.new(0, 200, 0, 100)
+        frame.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
+        
+        task.wait(0.5)
+    ]]
     
-    -- Тестовый код
-    local sg = Instance.new("ScreenGui", game.CoreGui)
-    sg.Name = "TestGUI"
-    sg.ResetOnSpawn = false
-    
-    local frame = Instance.new("Frame", sg)
-    frame.Size = UDim2.new(0, 200, 0, 100)
-    frame.Position = UDim2.new(0.5, -100, 0.5, -50)
-    frame.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
-    
-    task.wait(1)
-    
-    Logger.running = false
-    Logger:Restore()
-    
-    print("\n--- Test Results ---")
-    for _, line in ipairs(Logger.logs) do
-        print(line)
-    end
+    SpyScript(test_code)
 end
 
 return {
