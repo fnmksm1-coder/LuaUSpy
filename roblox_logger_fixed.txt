@@ -1,391 +1,315 @@
--- Advanced Function Spy для Roblox (CODE RECONSTRUCTION)
--- Перехватывает ВСЕ действия и воссоздает код
+-- Aggressive Low-Level Function Spy для Luraph/Obfuscated Scripts
+-- Работает на уровне metatable, перехватывает ВСЁ
 
 local Logger = {
     logs = {},
-    variables = {},
-    var_counter = 0,
-    enabled = false,
-    original_funcs = {}
+    instances = {},
+    instance_counter = 0,
+    running = false
 }
 
--- Генерация имени переменной
-function Logger:GetVarName(obj)
-    if not self.variables[obj] then
-        self.var_counter = self.var_counter + 1
-        self.variables[obj] = "_call" .. self.var_counter
+-- Генерация ID для Instance
+function Logger:GetInstanceID(inst)
+    if not self.instances[inst] then
+        self.instance_counter = self.instance_counter + 1
+        self.instances[inst] = "_inst" .. self.instance_counter
     end
-    return self.variables[obj]
+    return self.instances[inst]
 end
 
--- Сериализация значений
-function Logger:SerializeValue(value)
-    local valueType = type(value)
+-- Безопасная сериализация
+function Logger:Serialize(value)
+    local t = type(value)
     
-    if valueType == "nil" then
+    if t == "nil" then
         return "nil"
-    elseif valueType == "boolean" then
+    elseif t == "boolean" or t == "number" then
         return tostring(value)
-    elseif valueType == "number" then
-        return tostring(value)
-    elseif valueType == "string" then
-        -- Проверяем на специальные символы
-        if value:match("[^\32-\126]") then
-            return string.format("%q", value)
+    elseif t == "string" then
+        if #value > 50 then
+            return '"' .. value:sub(1, 50) .. '..."'
         end
-        return '"' .. value .. '"'
-    elseif valueType == "userdata" or valueType == "table" then
-        -- Если это уже залогированный объект
-        if self.variables[value] then
-            return self.variables[value]
-        end
-        
+        return '"' .. value:gsub('"', '\\"') .. '"'
+    elseif t == "userdata" then
         -- Пытаемся получить информацию об Instance
         local success, result = pcall(function()
             if value.ClassName then
-                return value:GetFullName()
+                return self:GetInstanceID(value)
             end
         end)
-        
         if success and result then
             return result
         end
-        
-        return self:GetVarName(value)
-    elseif valueType == "EnumItem" then
-        return tostring(value)
+        return "userdata"
+    elseif t == "table" then
+        -- Проверяем EnumItem
+        local success, str = pcall(tostring, value)
+        if success and str:match("^Enum%.") then
+            return str
+        end
+        return "table"
+    elseif t == "vector" then
+        return string.format("Vector3.new(%s, %s, %s)", value.X, value.Y, value.Z)
     else
-        return tostring(value)
+        local success, str = pcall(tostring, value)
+        if success then
+            return str
+        end
+        return t
     end
 end
 
--- Логирование строки кода
-function Logger:LogCode(code)
+-- Логирование
+function Logger:Log(code)
     table.insert(self.logs, code)
+    print("[SPY] " .. code)
 end
 
--- Хук Instance.new
-function Logger:HookInstanceNew()
-    local original_new = Instance.new
-    self.original_funcs.Instance_new = original_new
+-- Главный хук - перехватываем ВСЁ
+function Logger:Hook()
+    self.running = true
     
-    local logger = self
+    -- Получаем metatable
+    local mt = getrawmetatable(game)
+    local old_readonly = mt and mt.__metatable
     
-    Instance.new = function(className, parent)
-        if not logger.enabled then
-            return original_new(className, parent)
-        end
-        
-        local instance = original_new(className, parent)
-        local var_name = logger:GetVarName(instance)
-        
-        if parent then
-            local parent_str = logger:SerializeValue(parent)
-            logger:LogCode(string.format('local %s = Instance.new("%s", %s)', var_name, className, parent_str))
-        else
-            logger:LogCode(string.format('local %s = Instance.new("%s")', var_name, className))
-        end
-        
-        return instance
-    end
-end
-
--- Хук для Color3
-function Logger:HookColor3()
-    local original_fromRGB = Color3.fromRGB
-    local original_new = Color3.new
-    self.original_funcs.Color3_fromRGB = original_fromRGB
-    self.original_funcs.Color3_new = original_new
-    
-    local logger = self
-    
-    Color3.fromRGB = function(r, g, b)
-        local color = original_fromRGB(r, g, b)
-        if logger.enabled then
-            local var_name = logger:GetVarName(color)
-            logger:LogCode(string.format('local %s = Color3.fromRGB(%d, %d, %d)', var_name, r, g, b))
-        end
-        return color
-    end
-    
-    Color3.new = function(r, g, b)
-        local color = original_new(r, g, b)
-        if logger.enabled then
-            local var_name = logger:GetVarName(color)
-            logger:LogCode(string.format('local %s = Color3.new(%s, %s, %s)', var_name, r, g, b))
-        end
-        return color
-    end
-end
-
--- Хук для UDim2
-function Logger:HookUDim2()
-    local original_new = UDim2.new
-    self.original_funcs.UDim2_new = original_new
-    
-    local logger = self
-    
-    UDim2.new = function(xScale, xOffset, yScale, yOffset)
-        local udim = original_new(xScale, xOffset, yScale, yOffset)
-        if logger.enabled then
-            return udim
-        end
-        return udim
-    end
-end
-
--- Хук для UDim
-function Logger:HookUDim()
-    local original_new = UDim.new
-    self.original_funcs.UDim_new = original_new
-    
-    local logger = self
-    
-    UDim.new = function(scale, offset)
-        local udim = original_new(scale, offset)
-        if logger.enabled then
-            return udim
-        end
-        return udim
-    end
-end
-
--- Хук метатаблицы для отслеживания присвоений свойств
-function Logger:HookMetatable()
-    local success, mt = pcall(getrawmetatable, game)
-    if not success then
-        warn("[Logger] Cannot access metatable")
+    if not mt then
+        warn("[Logger] Cannot get metatable!")
         return
     end
     
-    pcall(setreadonly, mt, false)
+    -- Делаем metatable доступной для изменения
+    setreadonly(mt, false)
     
+    local original_namecall = mt.__namecall
     local original_newindex = mt.__newindex
     local original_index = mt.__index
-    local original_namecall = mt.__namecall
-    
-    self.original_funcs.mt_newindex = original_newindex
-    self.original_funcs.mt_index = original_index
-    self.original_funcs.mt_namecall = original_namecall
     
     local logger = self
     
-    -- Перехват присвоения свойств
-    mt.__newindex = function(instance, property, value)
-        if logger.enabled and type(instance) == "userdata" then
-            local var_name = logger.variables[instance]
-            if var_name then
-                local value_str = logger:SerializeValue(value)
-                logger:LogCode(string.format('%s.%s = %s', var_name, property, value_str))
-            end
+    -- Хук __namecall - перехватывает все вызовы методов
+    mt.__namecall = function(self, ...)
+        if not logger.running then
+            return original_namecall(self, ...)
         end
-        return original_newindex(instance, property, value)
-    end
-    
-    -- Перехват вызовов методов
-    mt.__namecall = function(instance, ...)
+        
         local method = getnamecallmethod()
         local args = {...}
         
-        if logger.enabled and type(instance) == "userdata" then
-            local var_name = logger.variables[instance]
-            
-            -- Специальная обработка для некоторых методов
-            if method == "Connect" and var_name then
-                logger:LogCode(string.format('%s:Connect(function(%s)', var_name, table.concat({"_" .. logger.var_counter .. "_" .. i for i = 1, #args}, ", ")))
-                -- Функция будет залогирована отдельно
-            elseif method == "Clone" and var_name then
-                local result = original_namecall(instance, ...)
-                local new_var = logger:GetVarName(result)
-                logger:LogCode(string.format('local %s = %s:Clone()', new_var, var_name))
-                return result
-            elseif method == "Destroy" and var_name then
-                logger:LogCode(string.format('%s:Destroy()', var_name))
-            elseif method == "FindFirstChild" or method == "WaitForChild" then
-                local result = original_namecall(instance, ...)
-                if var_name and args[1] then
-                    logger:LogCode(string.format('%s:%s("%s")', var_name, method, args[1]))
-                end
-                return result
-            elseif method == "GetService" then
-                local result = original_namecall(instance, ...)
-                if args[1] then
-                    logger:LogCode(string.format('game:GetService("%s")', args[1]))
-                end
-                return result
+        -- Особо важные методы
+        if method == "GetService" and args[1] then
+            logger:Log(string.format('game:GetService("%s")', args[1]))
+        elseif method == "FindFirstChild" and args[1] then
+            local id = logger:GetInstanceID(self)
+            logger:Log(string.format('%s:FindFirstChild("%s")', id, args[1]))
+        elseif method == "WaitForChild" and args[1] then
+            local id = logger:GetInstanceID(self)
+            logger:Log(string.format('%s:WaitForChild("%s")', id, args[1]))
+        elseif method == "Connect" then
+            local id = logger:GetInstanceID(self)
+            logger:Log(string.format('%s:Connect(function(...)', id))
+        elseif method == "Destroy" then
+            local id = logger:GetInstanceID(self)
+            logger:Log(string.format('%s:Destroy()', id))
+        elseif method == "Clone" then
+            local id = logger:GetInstanceID(self)
+            logger:Log(string.format('%s:Clone()', id))
+        end
+        
+        return original_namecall(self, ...)
+    end
+    
+    -- Хук __newindex - перехватывает присвоение свойств
+    mt.__newindex = function(self, property, value)
+        if logger.running then
+            local id = logger:GetInstanceID(self)
+            local val_str = logger:Serialize(value)
+            logger:Log(string.format('%s.%s = %s', id, property, val_str))
+        end
+        
+        return original_newindex(self, property, value)
+    end
+    
+    -- Хук __index - перехватывает чтение свойств (опционально)
+    -- Закомментировано т.к. может быть слишком много логов
+    --[[
+    mt.__index = function(self, property)
+        local result = original_index(self, property)
+        
+        if logger.running and type(result) == "userdata" then
+            local id = logger:GetInstanceID(self)
+            logger:Log(string.format('-- %s.%s accessed', id, property))
+        end
+        
+        return result
+    end
+    ]]
+    
+    setreadonly(mt, true)
+    
+    -- Хукаем Instance.new
+    local old_instance_new = Instance.new
+    Instance.new = function(className, parent)
+        local inst = old_instance_new(className, parent)
+        
+        if logger.running then
+            local id = logger:GetInstanceID(inst)
+            if parent then
+                local parent_id = logger:GetInstanceID(parent)
+                logger:Log(string.format('local %s = Instance.new("%s", %s)', id, className, parent_id))
+            else
+                logger:Log(string.format('local %s = Instance.new("%s")', id, className))
             end
         end
         
-        return original_namecall(instance, ...)
+        return inst
     end
     
-    pcall(setreadonly, mt, true)
-end
-
--- Хук глобальных функций
-function Logger:HookGlobals()
+    -- Хукаем Color3
+    local old_color3_rgb = Color3.fromRGB
+    Color3.fromRGB = function(r, g, b)
+        local color = old_color3_rgb(r, g, b)
+        
+        if logger.running then
+            local id = logger:GetInstanceID(color)
+            logger:Log(string.format('local %s = Color3.fromRGB(%d, %d, %d)', id, r, g, b))
+        end
+        
+        return color
+    end
+    
+    -- Хукаем UDim2
+    local old_udim2_new = UDim2.new
+    UDim2.new = function(...)
+        local udim = old_udim2_new(...)
+        -- Не логируем UDim2 т.к. слишком много
+        return udim
+    end
+    
+    -- Хукаем глобальные функции
+    local old_wait = task.wait or wait
+    local new_wait = function(time)
+        if logger.running and time then
+            logger:Log(string.format('task.wait(%s)', time))
+        end
+        return old_wait(time)
+    end
+    
+    if task then
+        task.wait = new_wait
+    else
+        _G.wait = new_wait
+    end
+    
     -- task.spawn
     if task and task.spawn then
-        local original = task.spawn
-        self.original_funcs.task_spawn = original
-        local logger = self
-        
+        local old_spawn = task.spawn
         task.spawn = function(func, ...)
-            if logger.enabled then
-                logger:LogCode('task.spawn(function(' .. table.concat({...}, ", ") .. ')')
+            if logger.running then
+                logger:Log('task.spawn(function(...)')
             end
-            return original(func, ...)
-        end
-    end
-    
-    -- task.wait
-    if task and task.wait then
-        local original = task.wait
-        self.original_funcs.task_wait = original
-        local logger = self
-        
-        task.wait = function(time)
-            if logger.enabled then
-                logger:LogCode(string.format('task.wait(%s)', time or ""))
-            end
-            return original(time)
+            return old_spawn(func, ...)
         end
     end
     
     -- writefile
     if writefile then
-        local original = writefile
-        self.original_funcs.writefile = original
-        local logger = self
-        
-        writefile = function(filename, content)
-            if logger.enabled then
-                logger:LogCode(string.format('writefile("%s", %s)', filename, logger:SerializeValue(content)))
+        local old_writefile = writefile
+        writefile = function(name, content)
+            if logger.running then
+                logger:Log(string.format('writefile("%s", ...)', name))
             end
-            return original(filename, content)
+            return old_writefile(name, content)
         end
     end
     
-    -- error
-    local original_error = error
-    self.original_funcs.error = original_error
-    local logger = self
-    
-    error = function(msg, level)
-        if logger.enabled then
-            logger:LogCode(string.format('error("%s")', tostring(msg)))
-        end
-        return original_error(msg, level)
-    end
+    print("[Logger] All hooks installed!")
 end
 
--- Генерация финального кода
-function Logger:GenerateCode()
-    local output = {
-        "-- Reconstructed code from Function Spy",
-        "-- Generated at: " .. os.date("%Y-%m-%d %H:%M:%S"),
+-- Генерация отчёта
+function Logger:GenerateReport()
+    local report = {
+        "-- Function Spy Output",
+        "-- Total operations logged: " .. #self.logs,
         "",
+        "-- Reconstructed code:",
         ""
     }
     
     for _, line in ipairs(self.logs) do
-        table.insert(output, line)
+        table.insert(report, line)
     end
     
-    return table.concat(output, "\n")
-end
-
--- Очистка
-function Logger:Clear()
-    self.logs = {}
-    self.variables = {}
-    self.var_counter = 0
-end
-
--- Старт
-function Logger:Start()
-    self:Clear()
-    self.enabled = true
-    
-    print("[Logger] Hooking Instance.new...")
-    self:HookInstanceNew()
-    
-    print("[Logger] Hooking Color3...")
-    self:HookColor3()
-    
-    print("[Logger] Hooking UDim2/UDim...")
-    self:HookUDim2()
-    self:HookUDim()
-    
-    print("[Logger] Hooking Metatable...")
-    self:HookMetatable()
-    
-    print("[Logger] Hooking Globals...")
-    self:HookGlobals()
-    
-    print("[Logger] Function Spy Active!")
-end
-
-function Logger:Stop()
-    self.enabled = false
-    
-    -- Восстанавливаем оригинальные функции
-    if self.original_funcs.Instance_new then
-        Instance.new = self.original_funcs.Instance_new
-    end
-    if self.original_funcs.Color3_fromRGB then
-        Color3.fromRGB = self.original_funcs.Color3_fromRGB
-    end
-    if self.original_funcs.Color3_new then
-        Color3.new = self.original_funcs.Color3_new
-    end
-    
-    print("[Logger] Function Spy Stopped!")
+    return table.concat(report, "\n")
 end
 
 -- Главная функция
-function SpyScript(script_code)
-    print("\n" .. string.rep("=", 80))
-    print("[FUNCTION SPY] Starting...")
-    print(string.rep("=", 80) .. "\n")
+function SpyScript(code)
+    print("\n===========================================")
+    print("Function Spy - Starting...")
+    print("===========================================\n")
     
-    Logger:Start()
+    Logger:Hook()
     
-    local success, error_msg = pcall(function()
-        local func, load_error = loadstring(script_code)
+    -- Запускаем целевой скрипт
+    local success, err = pcall(function()
+        local func = loadstring(code)
         if not func then
-            error("Failed to load script: " .. tostring(load_error))
+            error("Failed to load script")
         end
         func()
     end)
     
     if not success then
-        warn("[Logger] Script error: " .. tostring(error_msg))
+        warn("[Spy] Script error: " .. tostring(err))
     end
     
-    task.wait(2)
+    -- Даём время на async операции
+    task.wait(3)
     
-    Logger:Stop()
+    Logger.running = false
     
-    local code = Logger:GenerateCode()
+    print("\n===========================================")
+    print("Function Spy - Complete!")
+    print("Total operations: " .. #Logger.logs)
+    print("===========================================\n")
     
-    print("\n" .. string.rep("=", 80))
-    print("[FUNCTION SPY] Complete! Logged " .. #Logger.logs .. " operations")
-    print(string.rep("=", 80) .. "\n")
+    local report = Logger:GenerateReport()
+    print(report)
     
-    print(code)
-    
-    -- Сохраняем в файл если доступно
+    -- Сохраняем в файл
     if writefile then
-        writefile("spy_output.lua", code)
+        writefile("spy_output.lua", report)
         print("\n[Saved to: spy_output.lua]")
     end
     
-    return code
+    return report
 end
 
--- Экспорт
+-- Простой тест
+function TestSpy()
+    print("Running simple test...")
+    
+    Logger:Hook()
+    
+    -- Тестовый код
+    local sg = Instance.new("ScreenGui", game.CoreGui)
+    sg.Name = "TestGUI"
+    
+    local frame = Instance.new("Frame", sg)
+    frame.Size = UDim2.new(0, 200, 0, 100)
+    frame.BackgroundColor3 = Color3.fromRGB(255, 0, 0)
+    
+    task.wait(0.5)
+    
+    Logger.running = false
+    
+    local report = Logger:GenerateReport()
+    print(report)
+end
+
 return {
-    Logger = Logger,
-    SpyScript = SpyScript
+    SpyScript = SpyScript,
+    TestSpy = TestSpy,
+    Logger = Logger
 }
