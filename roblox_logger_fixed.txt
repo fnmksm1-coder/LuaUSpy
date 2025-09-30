@@ -40,6 +40,33 @@ function Logger:Serialize(value)
         if success and result then
             return result
         end
+        
+        -- Пробуем определить тип userdata
+        local success2, typename = pcall(function()
+            return typeof(value)
+        end)
+        
+        if success2 then
+            if typename == "Color3" then
+                return string.format("Color3.fromRGB(%d, %d, %d)", 
+                    math.floor(value.R * 255), 
+                    math.floor(value.G * 255), 
+                    math.floor(value.B * 255))
+            elseif typename == "UDim2" then
+                return string.format("UDim2.new(%s, %s, %s, %s)", 
+                    value.X.Scale, value.X.Offset, 
+                    value.Y.Scale, value.Y.Offset)
+            elseif typename == "UDim" then
+                return string.format("UDim.new(%s, %s)", value.Scale, value.Offset)
+            elseif typename == "Vector2" then
+                return string.format("Vector2.new(%s, %s)", value.X, value.Y)
+            elseif typename == "Vector3" then
+                return string.format("Vector3.new(%s, %s, %s)", value.X, value.Y, value.Z)
+            elseif typename == "CFrame" then
+                return "CFrame.new(...)"
+            end
+        end
+        
         return "userdata"
     elseif t == "table" then
         -- Проверяем EnumItem
@@ -61,8 +88,11 @@ end
 
 -- Логирование
 function Logger:Log(code)
+    -- Временно выключаем логирование чтобы избежать рекурсии
+    self.running = false
     table.insert(self.logs, code)
     print("[SPY] " .. code)
+    self.running = true
 end
 
 -- Главный хук - перехватываем ВСЁ
@@ -121,10 +151,13 @@ function Logger:Hook()
     
     -- Хук __newindex - перехватывает присвоение свойств
     mt.__newindex = function(self, property, value)
-        if logger.running then
-            local id = logger:GetInstanceID(self)
-            local val_str = logger:Serialize(value)
-            logger:Log(string.format('%s.%s = %s', id, property, val_str))
+        -- Игнорируем внутренние объекты логгера
+        if logger.running and not logger.instances[self] then
+            local success = pcall(function()
+                local id = logger:GetInstanceID(self)
+                local val_str = logger:Serialize(value)
+                logger:Log(string.format('%s.%s = %s', id, property, val_str))
+            end)
         end
         
         return original_newindex(self, property, value)
